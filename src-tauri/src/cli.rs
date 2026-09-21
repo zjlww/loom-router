@@ -9,6 +9,19 @@ use std::sync::Arc;
 
 const SERVICE_LABEL: &str = "dev.loomrouter.agent";
 const CATALOG_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+// why: launchd unloads a booted-out job asynchronously. It schedules cleanup a
+// few seconds later and rejects a bootstrap of the same label with
+// "Operation already in progress" (EALREADY) until that cleanup finishes, so an
+// install that boots out and immediately re-bootstraps the agent fails unless we
+// wait for the label to disappear first.
+const SERVICE_REMOVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const SERVICE_REMOVAL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+// why: even after the label is gone launchd can still refuse the first
+// bootstrap that races a teardown it has not finished bookkeeping, so retry a
+// bounded number of times instead of failing the install (and leaving the
+// service down) on a transient error.
+const SERVICE_BOOTSTRAP_ATTEMPTS: usize = 10;
+const SERVICE_BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -427,8 +440,13 @@ fn install_service(link: Option<&Path>) -> Result<ServiceOperation> {
     let domain = launchctl_domain()?;
     let service = service_target(&domain);
     let _ = run_launchctl(["bootout", service.as_str()]);
-    run_launchctl(["bootstrap", domain.as_str(), path_str(&plist)?])
-        .context("launchctl bootstrap failed")?;
+    wait_for_service_removal(&service);
+    retry_launchctl(
+        SERVICE_BOOTSTRAP_ATTEMPTS,
+        SERVICE_BOOTSTRAP_RETRY_DELAY,
+        || run_launchctl(["bootstrap", domain.as_str(), path_str(&plist)?]),
+    )
+    .context("launchctl bootstrap failed")?;
     run_launchctl(["kickstart", "-k", service.as_str()]).context("launchctl kickstart failed")?;
 
     if let Some(link) = link {
@@ -442,6 +460,7 @@ fn uninstall_service() -> Result<ServiceOperation> {
     let domain = launchctl_domain()?;
     let service = service_target(&domain);
     let _ = run_launchctl(["bootout", service.as_str()]);
+    wait_for_service_removal(&service);
     let plist = launch_agent_path();
     match std::fs::remove_file(&plist) {
         Ok(()) => {}
@@ -558,6 +577,42 @@ fn run_launchctl<const N: usize>(args: [&str; N]) -> Result<()> {
         stdout.trim(),
         stderr.trim()
     )
+}
+
+fn service_is_loaded(service: &str) -> bool {
+    ProcessCommand::new("launchctl")
+        .args(["print", service])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_service_removal(service: &str) -> bool {
+    let deadline = std::time::Instant::now() + SERVICE_REMOVAL_TIMEOUT;
+    while service_is_loaded(service) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(SERVICE_REMOVAL_POLL);
+    }
+    true
+}
+
+fn retry_launchctl<F>(attempts: usize, delay: std::time::Duration, mut operation: F) -> Result<()>
+where
+    F: FnMut() -> Result<()>,
+{
+    let mut last_error = None;
+    for _ in 0..attempts.max(1) {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(delay);
+            }
+        }
+    }
+    Err(last_error.expect("attempts is at least one"))
 }
 
 fn install_managed_binary(source: &Path, destination: &Path) -> Result<()> {
@@ -791,6 +846,34 @@ mod tests {
     fn service_target_is_scoped_to_the_launch_agent() {
         assert_eq!(service_target("gui/501"), "gui/501/dev.loomrouter.agent");
         assert_ne!(service_target("gui/501"), "gui/501");
+    }
+
+    #[test]
+    fn retry_launchctl_recovers_from_transient_failures() {
+        let mut calls = 0;
+        let result = retry_launchctl(3, std::time::Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                bail!("transient launchctl failure");
+            }
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn retry_launchctl_reports_the_last_error_once_the_budget_is_spent() {
+        let mut calls = 0;
+        let result = retry_launchctl(2, std::time::Duration::ZERO, || {
+            calls += 1;
+            bail!("Bootstrap failed: 5: Input/output error")
+        });
+
+        let error = result.expect_err("retry budget is exhausted");
+        assert_eq!(calls, 2);
+        assert!(error.to_string().contains("Bootstrap failed"));
     }
 
     #[test]
