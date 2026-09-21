@@ -424,12 +424,12 @@ fn install_service(link: Option<&Path>) -> Result<ServiceOperation> {
     std::fs::write(&plist, launch_agent_plist(&binary)?)
         .with_context(|| format!("failed to write {}", plist.display()))?;
 
-    let target = launchctl_domain()?;
-    let _ = run_launchctl(["bootout", target.as_str()]);
-    run_launchctl(["bootstrap", target.as_str(), path_str(&plist)?])
+    let domain = launchctl_domain()?;
+    let service = service_target(&domain);
+    let _ = run_launchctl(["bootout", service.as_str()]);
+    run_launchctl(["bootstrap", domain.as_str(), path_str(&plist)?])
         .context("launchctl bootstrap failed")?;
-    run_launchctl(["kickstart", "-k", &format!("{target}/{SERVICE_LABEL}")])
-        .context("launchctl kickstart failed")?;
+    run_launchctl(["kickstart", "-k", service.as_str()]).context("launchctl kickstart failed")?;
 
     if let Some(link) = link {
         install_cli_link(link, &binary)?;
@@ -439,8 +439,9 @@ fn install_service(link: Option<&Path>) -> Result<ServiceOperation> {
 
 fn uninstall_service() -> Result<ServiceOperation> {
     ensure_macos()?;
-    let target = launchctl_domain()?;
-    let _ = run_launchctl(["bootout", target.as_str()]);
+    let domain = launchctl_domain()?;
+    let service = service_target(&domain);
+    let _ = run_launchctl(["bootout", service.as_str()]);
     let plist = launch_agent_path();
     match std::fs::remove_file(&plist) {
         Ok(()) => {}
@@ -454,9 +455,9 @@ fn uninstall_service() -> Result<ServiceOperation> {
 
 fn restart_service() -> Result<ServiceOperation> {
     ensure_macos()?;
-    let target = launchctl_domain()?;
-    run_launchctl(["kickstart", "-k", &format!("{target}/{SERVICE_LABEL}")])
-        .context("launchctl kickstart failed")?;
+    let domain = launchctl_domain()?;
+    let service = service_target(&domain);
+    run_launchctl(["kickstart", "-k", service.as_str()]).context("launchctl kickstart failed")?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     Ok(service_operation("restart", None))
 }
@@ -496,9 +497,10 @@ fn service_status() -> ServiceStatus {
 
 fn launchctl_status() -> Result<(bool, Option<u32>)> {
     ensure_macos()?;
-    let target = launchctl_domain()?;
+    let domain = launchctl_domain()?;
+    let service = service_target(&domain);
     let output = ProcessCommand::new("launchctl")
-        .args(["print", &format!("{target}/{SERVICE_LABEL}")])
+        .args(["print", service.as_str()])
         .output()
         .context("failed to run launchctl print")?;
     if !output.status.success() {
@@ -534,6 +536,10 @@ fn launchctl_domain() -> Result<String> {
         bail!("id -u returned an empty uid");
     }
     Ok(format!("gui/{uid}"))
+}
+
+fn service_target(domain: &str) -> String {
+    format!("{domain}/{SERVICE_LABEL}")
 }
 
 fn run_launchctl<const N: usize>(args: [&str; N]) -> Result<()> {
@@ -779,6 +785,12 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(!plist.contains("--window"));
+    }
+
+    #[test]
+    fn service_target_is_scoped_to_the_launch_agent() {
+        assert_eq!(service_target("gui/501"), "gui/501/dev.loomrouter.agent");
+        assert_ne!(service_target("gui/501"), "gui/501");
     }
 
     #[test]
