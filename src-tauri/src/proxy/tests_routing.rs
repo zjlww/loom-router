@@ -1093,6 +1093,32 @@ fn bare_model_routes_when_native_slug_mode_is_enabled() {
 }
 
 #[test]
+fn slash_containing_published_model_routes_in_native_slug_mode() {
+    // Codex can send the exact published slug from its merged catalog. Some
+    // external ids contain a slash, so the first `/` is not necessarily a
+    // provider separator. Before this case was handled, `~openai/...`
+    // resolved its fake prefix, failed, and escaped to native ChatGPT.
+    let mut cfg = demo_config(None);
+    cfg.native_slug_mode = true;
+    cfg.providers.get_mut("cheap").unwrap().models[0].id = "~openai/gpt-sol-latest".into();
+
+    let (provider, upstream) = resolve(&cfg, "~openai/gpt-sol-latest").unwrap();
+    assert_eq!(provider.id, "cheap");
+    assert_eq!(upstream, "~openai/gpt-sol-latest");
+}
+
+#[test]
+fn explicit_provider_slug_still_wins_over_a_published_model_id() {
+    let mut cfg = demo_config(None);
+    cfg.native_slug_mode = true;
+    cfg.providers.get_mut("cheap").unwrap().models[0].id = "~openai/gpt-sol-latest".into();
+
+    let (provider, upstream) = resolve(&cfg, "cheap/~openai/gpt-sol-latest").unwrap();
+    assert_eq!(provider.id, "cheap");
+    assert_eq!(upstream, "~openai/gpt-sol-latest");
+}
+
+#[test]
 fn fallback_routes_side_calls() {
     let cfg = demo_config(Some("cheap/mini"));
     // A native-model side call that would otherwise hit the ChatGPT

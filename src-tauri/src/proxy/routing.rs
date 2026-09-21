@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, Provider, ProviderProtocol};
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use axum::http::HeaderMap;
 use serde_json::Value;
 
@@ -63,7 +63,7 @@ pub(super) fn resolve<'a>(
         None => (None, model.to_string()),
     };
 
-    if let Some(pid) = provider_id {
+    if let Some(ref pid) = provider_id {
         // The OpenCode gateways used to be three providers each - the
         // dialect lived on the provider. Threads saved before the merge
         // still address `opencode-go-chat/deepseek-v4-flash` and friends.
@@ -72,22 +72,26 @@ pub(super) fn resolve<'a>(
         // 400 - Codex then loses the conversation. The dialect is a
         // per-model field on the merged provider, so the model resolves to
         // the same upstream either way.
-        let resolved = if config.providers.contains_key(&pid) {
+        let resolved = if config.providers.contains_key(pid.as_str()) {
             pid.as_str()
         } else {
-            merged_opencode_provider(config, &pid).unwrap_or(&pid)
+            merged_opencode_provider(config, pid).unwrap_or(pid)
         };
-        let p = config
-            .providers
-            .get(resolved)
-            .ok_or_else(|| anyhow!("unknown provider '{pid}'"))?;
-        if !p.enabled {
-            bail!("provider '{pid}' is disabled");
+        if let Some(p) = config.providers.get(resolved) {
+            if !p.enabled {
+                bail!("provider '{pid}' is disabled");
+            }
+            return Ok((p, upstream));
         }
-        return Ok((p, upstream));
-    }
-
-    if !config.native_slug_mode {
+        // Native-slug mode publishes external model ids verbatim, and some
+        // valid ids contain a slash (for example `~openai/gpt-sol-latest`).
+        // Splitting that string produces a fake provider called `~openai`;
+        // do not turn a valid published model into ChatGPT passthrough just
+        // because its id happens to look like `provider/model`.
+        if !config.native_slug_mode {
+            bail!("unknown provider '{pid}'");
+        }
+    } else if !config.native_slug_mode {
         bail!("bare model '{model}' is reserved for native passthrough");
     }
 
@@ -95,6 +99,10 @@ pub(super) fn resolve<'a>(
         if p.models.iter().any(|m| m.enabled && m.id == model) {
             return Ok((p, model.to_string()));
         }
+    }
+
+    if let Some(ref pid) = provider_id {
+        bail!("unknown provider '{pid}'");
     }
     bail!("no enabled provider serves model '{model}'")
 }
