@@ -439,12 +439,10 @@ fn managed_block_is_valid_toml_with_websockets_on() {
 }
 
 #[test]
-fn every_mode_gets_exactly_one_catalog_mechanism() {
-    // Codex learns the merged catalog either from the on-disk pointer or from
-    // the proxy's `/models`, and the live refresh rides on the provider auth
-    // command that only routed mode lacks. Dropping the pointer in both modes
-    // once left the default install with no catalog at all.
-
+fn every_mode_points_at_the_merged_catalog() {
+    // The explicit catalog pointer keeps native entries out of the picker in
+    // native slug mode; relying on `/models` made Codex merge its built-ins
+    // back into the external-only catalog.
     let routed = managed_block(4180, "C:/x/merged-models.json", false);
     let parsed: toml::Value = toml::from_str(&routed).unwrap();
     assert_eq!(
@@ -459,7 +457,12 @@ fn every_mode_gets_exactly_one_catalog_mechanism() {
 
     let native = managed_block(4180, "C:/x/merged-models.json", true);
     let parsed: toml::Value = toml::from_str(&native).unwrap();
-    assert!(parsed.get("model_catalog_json").is_none());
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/x/merged-models.json")
+    );
     assert!(parsed["model_providers"]["loomrouter"]
         .get("auth")
         .is_some());
@@ -474,6 +477,12 @@ fn native_slug_mode_drops_openai_auth_requirement() {
     // The whole point of the mode: no ChatGPT login gate. Codex then
     // authenticates only with the static proxy-token headers.
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+    assert_eq!(
+        parsed
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str),
+        Some("C:/x/merged-models.json")
+    );
     let auth = provider["auth"].as_table().unwrap();
     assert_eq!(
         auth["args"].as_array().unwrap(),

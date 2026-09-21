@@ -3,12 +3,13 @@
 //!
 //! Artifacts:
 //!   1. A marked managed block in `~/.codex/config.toml` pointing
-//!      `openai_base_url` at the LoomRouter proxy. Codex fetches the merged
-//!      catalog from the proxy's `/models` endpoint while it is running.
+//!      `openai_base_url` at the LoomRouter proxy and `model_catalog_json`
+//!      at the merged catalog LoomRouter maintains on disk.
 //!   2. `~/.codex/loom-router/native-models.json`: the native catalog,
 //!      captured from `codex debug models`.
 //!   3. `~/.codex/loom-router/merged-models.json`: native entries plus one
-//!      entry per enabled external model, built by cloning a native template
+//!      entry per enabled external model in routed mode, or external entries
+//!      only in native slug mode. Both are built by cloning a native template
 //!      (the same schema Codex itself emits).
 //!
 //! Everything LoomRouter writes to config.toml is wrapped in BEGIN/END
@@ -20,9 +21,10 @@
 //! `codex-rs/models-manager`, plus the official configuration reference):
 //! whether Codex demands an OpenAI/ChatGPT login is a *provider-level*
 //! decision (`model_providers.<id>.requires_openai_auth`), not a slug-format
-//! decision. The picker lists the catalog returned by `/models`; the
-//! slug shape only affects metadata lookup (a `namespace/model` slug gets a
-//! single leading segment stripped for longest-prefix matching) and display.
+//! decision. The explicit `model_catalog_json` pointer is authoritative for
+//! the picker. The slug shape only affects metadata lookup (a `namespace/model`
+//! slug gets a single leading segment stripped for longest-prefix matching)
+//! and display.
 //!
 //! - **Routed mode (default, `native_slug_mode = false`)**: external models
 //!   are published as `provider/model` slugs and the managed provider keeps
@@ -39,7 +41,9 @@
 //!   LoomRouter proxy resolves bare ids to the unique enabled provider
 //!   serving that model, so no proxy change is needed. Native GPT entries
 //!   are dropped from the merged catalog in this mode: without a ChatGPT
-//!   token they can only fail, and leaving them in the picker is noise.
+//!   token they can only fail, and leaving them in the picker is noise. The
+//!   external-only catalog is still published through `model_catalog_json`;
+//!   otherwise Codex merges its built-in catalog back into the picker.
 
 use crate::config::AppConfig;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};

@@ -436,23 +436,18 @@ fn managed_block(port: u16, catalog_path: &str, native_slug_mode: bool) -> Strin
         .unwrap_or_else(|_| "loom-router".to_string())
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    // The live `/models` refresh rides on Codex's provider auth command, which
-    // only applies when `requires_openai_auth = false`. Routed mode keeps the
-    // ChatGPT token instead, so it gets no refresh worker and still needs the
-    // on-disk catalog pointer. The two are complementary, never both absent.
-    let (provider_auth, catalog_pointer) = if native_slug_mode {
-        (
-            format!(
-                "auth = {{ command = \"{executable}\", args = [\"provider-auth\"], refresh_interval_ms = 900000 }}\n"
-            ),
-            String::new(),
+    // Every mode points Codex at the on-disk merged catalog. Native slug mode
+    // also installs the provider auth command, preserving its no-OpenAI-login
+    // setup while the external-only catalog remains authoritative in the
+    // desktop picker.
+    let provider_auth = if native_slug_mode {
+        format!(
+            "auth = {{ command = \"{executable}\", args = [\"provider-auth\"], refresh_interval_ms = 900000 }}\n"
         )
     } else {
-        (
-            String::new(),
-            format!("model_catalog_json = \"{catalog_path}\"\n"),
-        )
+        String::new()
     };
+    let catalog_pointer = format!("model_catalog_json = \"{catalog_path}\"\n");
     format!(
         "{BEGIN_MARK}\n\
          model_provider = \"loomrouter\"\n\
