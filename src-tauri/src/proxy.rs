@@ -161,7 +161,7 @@ struct ProxyCtx {
     config: SharedConfig,
     stats: SharedStats,
     key_pools: KeyPools,
-    client: reqwest::Client,
+    clients: crate::network::ProviderClients,
     /// Routed-turn history shared across WebSocket connections. Routed
     /// providers are stateless, so each incremental follow-up turn replays
     /// the full item list; the cache is what lets that rebuild happen. It is
@@ -171,6 +171,19 @@ struct ProxyCtx {
     /// lose everything on reconnect and reset the context window to zero.
     history: Arc<Mutex<WsHistory>>,
     wake: crate::wake_lock::WakeController,
+}
+
+impl ProxyCtx {
+    async fn client_for_provider(&self, provider_id: &str) -> anyhow::Result<reqwest::Client> {
+        let proxy_url = self
+            .config
+            .read()
+            .await
+            .provider_proxies
+            .get(provider_id)
+            .cloned();
+        self.clients.for_proxy(proxy_url.as_deref())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,10 +244,7 @@ pub(crate) fn router_with_pools_and_wake(
         config,
         stats,
         key_pools,
-        client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .expect("reqwest client"),
+        clients: crate::network::ProviderClients::new(std::time::Duration::from_secs(600)),
         history: Arc::new(Mutex::new(WsHistory::new())),
         wake,
     };
@@ -650,7 +660,7 @@ async fn handle_compact(
         .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
     let url = format!("{}/responses/compact", base.trim_end_matches('/'));
 
-    let mut req = ctx.client.post(&url).json(&payload);
+    let mut req = ctx.clients.direct().post(&url).json(&payload);
     for name in NATIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {
@@ -687,7 +697,7 @@ async fn handle_native_image(
     let target = native_image_target(Some(uri.path()), &base)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown image route".to_string()))?;
 
-    let mut req = ctx.client.post(&target).body(body);
+    let mut req = ctx.clients.direct().post(&target).body(body);
     for name in NATIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {

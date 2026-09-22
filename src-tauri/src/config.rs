@@ -248,6 +248,10 @@ pub struct AppConfig {
     /// whose payloads are the only ones expected to grow with context.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Optional per-provider upstream proxy URL, keyed by provider id.
+    /// Providers absent from this map connect directly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_proxies: BTreeMap<String, String>,
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
     /// Whether the Codex integration is active. When true, any config
@@ -328,12 +332,35 @@ fn default_max_request_body_bytes() -> usize {
     DEFAULT_MAX_REQUEST_BODY_BYTES
 }
 
+fn validate_proxy_url(proxy: &str) -> Result<(), String> {
+    let proxy = proxy.trim();
+    if proxy.is_empty() {
+        return Err("provider proxy must not be empty".to_string());
+    }
+    let url = reqwest::Url::parse(proxy)
+        .map_err(|error| format!("provider proxy is not a valid URL: {error}"))?;
+    if !matches!(
+        url.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return Err(format!(
+            "provider proxy scheme '{}' is not supported",
+            url.scheme()
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err("provider proxy URL has no host".to_string());
+    }
+    Ok(())
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             schema_version: default_schema_version(),
             port: default_port(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            provider_proxies: BTreeMap::new(),
             providers: BTreeMap::new(),
             codex_integration: false,
             side_call_fallback: None,
@@ -414,6 +441,12 @@ impl AppConfig {
         }
         if self.port == 0 {
             return Err("port must be non-zero".to_string());
+        }
+        for (provider_id, proxy) in &self.provider_proxies {
+            if provider_id.trim().is_empty() {
+                return Err("provider proxy key must not be empty".to_string());
+            }
+            validate_proxy_url(proxy)?;
         }
         for (provider_id, provider) in &self.providers {
             if provider_id.trim().is_empty() {
@@ -703,6 +736,45 @@ mod tests {
         let config: AppConfig = serde_json::from_str("{}").unwrap();
 
         assert_eq!(config.sleep_prevention, SleepPreventionMode::WhileActive);
+    }
+
+    #[test]
+    fn provider_proxy_accepts_socks5h_and_round_trips() {
+        let config = AppConfig {
+            provider_proxies: std::collections::BTreeMap::from([(
+                "openrouter".to_string(),
+                "socks5h://127.0.0.1:8235".to_string(),
+            )]),
+            ..AppConfig::default()
+        };
+
+        config.validate().unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json["provider_proxies"]["openrouter"],
+            "socks5h://127.0.0.1:8235"
+        );
+        assert_eq!(
+            serde_json::from_value::<AppConfig>(json)
+                .unwrap()
+                .provider_proxies
+                .get("openrouter")
+                .map(String::as_str),
+            Some("socks5h://127.0.0.1:8235")
+        );
+    }
+
+    #[test]
+    fn provider_proxy_validation_rejects_unsupported_schemes() {
+        let config = AppConfig {
+            provider_proxies: std::collections::BTreeMap::from([(
+                "openrouter".to_string(),
+                "ftp://127.0.0.1:8235".to_string(),
+            )]),
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().unwrap_err().contains("scheme"));
     }
 
     #[test]

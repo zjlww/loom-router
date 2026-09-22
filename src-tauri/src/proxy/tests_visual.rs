@@ -2,6 +2,10 @@ use super::tests_routing::demo_config;
 use super::*;
 use crate::config::{Provider, ProviderKey};
 
+fn test_clients() -> crate::network::ProviderClients {
+    crate::network::ProviderClients::new(std::time::Duration::from_secs(10))
+}
+
 #[test]
 fn finds_responses_data_and_remote_images_without_text_only_parts() {
     let payload = json!({
@@ -55,7 +59,7 @@ async fn rejects_non_user_images_before_visual_provider_preparation() {
     let original = payload.clone();
 
     let error = prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,
@@ -184,7 +188,7 @@ async fn native_vision_destination_bypasses_an_unconfigured_visual_chain() {
     let original = payload.clone();
 
     prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,
@@ -209,7 +213,7 @@ async fn disabled_assistance_preserves_a_text_only_request() {
     let original = payload.clone();
 
     prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::ChatCompletions,
@@ -233,7 +237,7 @@ async fn disabled_assistance_preserves_images_for_an_uncatalogued_routed_model()
     let original = payload.clone();
 
     prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,
@@ -258,7 +262,7 @@ async fn exhausted_visual_chain_returns_before_the_text_only_payload_is_built() 
     let original = payload.clone();
 
     let error = prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,
@@ -378,7 +382,7 @@ async fn visual_assistance_forwards_the_opencode_session_header() {
     );
 
     prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,
@@ -418,7 +422,7 @@ async fn visual_assistance_mints_a_session_when_the_caller_has_none() {
     });
 
     prepare_visual_assistance(
-        &reqwest::Client::new(),
+        &test_clients(),
         &cfg,
         &mut payload,
         WireApi::Responses,

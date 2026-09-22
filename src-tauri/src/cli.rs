@@ -102,6 +102,7 @@ struct ProxyStatus {
 struct ConfigStatus {
     path: PathBuf,
     schema_version: u32,
+    provider_proxies: std::collections::BTreeMap<String, String>,
     provider_count: usize,
     enabled_provider_count: usize,
     enabled_model_count: usize,
@@ -326,6 +327,7 @@ impl From<&AppConfig> for ConfigStatus {
         Self {
             path: crate::config::config_path(),
             schema_version: config.schema_version,
+            provider_proxies: config.provider_proxies.clone(),
             provider_count: config.providers.len(),
             enabled_provider_count: enabled_providers.len(),
             enabled_model_count: enabled_models.len(),

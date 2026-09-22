@@ -1,6 +1,6 @@
 //! Live provider catalog discovery, models.dev enrichment, and dialect probes.
 
-use super::{http_client, AppState};
+use super::{direct_http_client, provider_http_client, AppState};
 use crate::codex;
 use std::collections::{HashMap, HashSet};
 
@@ -50,7 +50,7 @@ impl AppState {
             return cached;
         }
 
-        let response = http_client().get(MODELS_DEV_URL).send().await.ok()?;
+        let response = direct_http_client().get(MODELS_DEV_URL).send().await.ok()?;
         if !response.status().is_success() {
             return None;
         }
@@ -165,12 +165,15 @@ impl AppState {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<(Vec<String>, bool)> {
-        let provider = {
+        let (provider, proxy_url) = {
             let cfg = self.config.read().await;
-            cfg.providers
+            let provider = cfg
+                .providers
                 .get(provider_id)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?
+                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+            let proxy_url = cfg.provider_proxies.get(provider_id).cloned();
+            (provider, proxy_url)
         };
         // claude-code has no remote catalog to fetch, but it does have a
         // public one: models.dev is already downloaded here for context
@@ -179,7 +182,7 @@ impl AppState {
         let mut detailed = if provider.id == crate::providers::CLAUDE_CODE_PROVIDER_ID {
             claude_code_catalog(self.models_dev_catalog().await.as_ref())
         } else {
-            list_models_detailed(&provider).await?
+            list_models_detailed(&provider, proxy_url.as_deref()).await?
         };
         let enabled_ids: Vec<String> = provider
             .models
@@ -192,7 +195,7 @@ impl AppState {
         // for a multi-megabyte catalog before it validates enabled models.
         let (_, detected_protocols) = futures::join!(
             self.enrich_from_models_dev(provider_id, &mut detailed),
-            probe_enabled_model_dialects(&provider, provider_id, enabled_ids),
+            probe_enabled_model_dialects(&provider, provider_id, enabled_ids, proxy_url.as_deref(),),
         );
         let vision_models = self.vision_models_from_models_dev(provider_id).await;
         match &vision_models {
@@ -397,14 +400,17 @@ async fn probe_enabled_model_dialects(
     provider: &crate::config::Provider,
     provider_id: &str,
     model_ids: Vec<String>,
+    proxy_url: Option<&str>,
 ) -> HashMap<String, crate::config::ProviderProtocol> {
     use futures::stream::{self, StreamExt};
 
+    let proxy_url = proxy_url.map(str::to_string);
     stream::iter(model_ids.into_iter().map(|id| {
         let provider = provider.clone();
         let provider_id = provider_id.to_string();
+        let proxy_url = proxy_url.clone();
         async move {
-            let protocol = probe_model_dialect(&provider, &id).await;
+            let protocol = probe_model_dialect(&provider, &id, proxy_url.as_deref()).await;
             (provider_id, id, protocol)
         }
     }))
@@ -489,6 +495,7 @@ fn summarize_probe_rejection(body: &str) -> String {
 pub(super) async fn probe_model_dialect(
     provider: &crate::config::Provider,
     model: &str,
+    proxy_url: Option<&str>,
 ) -> anyhow::Result<crate::config::ProviderProtocol> {
     use crate::config::ProviderProtocol;
 
@@ -497,7 +504,7 @@ pub(super) async fn probe_model_dialect(
         return Ok(ProviderProtocol::Anthropic);
     }
 
-    let client = http_client();
+    let client = provider_http_client(proxy_url)?;
     let provider = provider_with_primary_key(provider);
     // One id for the whole model, not one per dialect: the three attempts are
     // one logical question about one model, and that is what the gateway's
@@ -638,6 +645,7 @@ pub(super) fn claude_code_catalog(
 /// `AppState::discover_models` covers.
 pub async fn list_models_detailed(
     p: &crate::config::Provider,
+    proxy_url: Option<&str>,
 ) -> anyhow::Result<Vec<(String, Option<u32>)>> {
     // The claude-code provider has no remote catalog: requests are served by
     // the local `claude` CLI on the subscription. Callers on this path are
@@ -649,7 +657,7 @@ pub async fn list_models_detailed(
     }
     let provider = provider_with_primary_key(p);
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
-    let client = http_client();
+    let client = provider_http_client(proxy_url)?;
     // Protocol-correct auth shared with the proxy (Anthropic gets
     // x-api-key + anthropic-version; everything else a bearer token). The
     // catalog is the whole provider, not one model: provider dialect.
@@ -694,7 +702,14 @@ pub async fn list_models_detailed(
 
 /// Fetch a provider's live model catalog (also validates the API key).
 pub async fn list_models(p: &crate::config::Provider) -> anyhow::Result<Vec<String>> {
-    Ok(list_models_detailed(p)
+    list_models_with_proxy(p, None).await
+}
+
+pub async fn list_models_with_proxy(
+    p: &crate::config::Provider,
+    proxy_url: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    Ok(list_models_detailed(p, proxy_url)
         .await?
         .into_iter()
         .map(|(id, _)| id)
@@ -810,7 +825,7 @@ mod tests {
         let url = spawn_dialect_probe_server(seen.clone()).await;
 
         let go = probe_provider(crate::providers::OPENCODE_GO_PROVIDER_ID, &url);
-        let detected = probe_model_dialect(&go, "kimi-k3").await.unwrap();
+        let detected = probe_model_dialect(&go, "kimi-k3", None).await.unwrap();
         assert_eq!(detected, ProviderProtocol::OpenAI);
 
         let sessions = seen.lock().unwrap().clone();
@@ -827,7 +842,7 @@ mod tests {
 
         seen.lock().unwrap().clear();
         let other = probe_provider("some-gateway", &url);
-        probe_model_dialect(&other, "kimi-k3").await.unwrap();
+        probe_model_dialect(&other, "kimi-k3", None).await.unwrap();
         let sessions = seen.lock().unwrap().clone();
         assert!(
             sessions.iter().all(Option::is_none),

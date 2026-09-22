@@ -5,6 +5,7 @@ mod model_discovery;
 
 use crate::codex;
 use crate::config::AppConfig;
+use crate::state::model_discovery::list_models_with_proxy;
 #[cfg(test)]
 use crate::stats::RequestEntry;
 use crate::stats::{SharedStats, Stats};
@@ -197,7 +198,7 @@ fn derive_setup_status(
 
 /// Shared HTTP client for provider probes: one connection pool and TLS
 /// session cache for the whole app instead of rebuilding both per call.
-fn http_client() -> &'static reqwest::Client {
+fn direct_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -205,6 +206,10 @@ fn http_client() -> &'static reqwest::Client {
             .build()
             .expect("failed to build shared HTTP client")
     })
+}
+
+fn provider_http_client(proxy_url: Option<&str>) -> anyhow::Result<reqwest::Client> {
+    crate::network::client(proxy_url, std::time::Duration::from_secs(20))
 }
 
 /// One quota bar on the Overview card (e.g. "Weekly quota  52%").
@@ -305,6 +310,7 @@ fn zai_quota_bar(limit: &serde_json::Value) -> Option<QuotaBar> {
 async fn fetch_balance(
     p: &crate::config::Provider,
     key: Option<&crate::config::ProviderKey>,
+    proxy_url: Option<String>,
 ) -> ProviderBalance {
     use crate::proxy::ProviderFamily;
     let mut provider = p.clone();
@@ -334,7 +340,13 @@ async fn fetch_balance(
         }
         return result;
     }
-    let client = http_client();
+    let client = match provider_http_client(proxy_url.as_deref()) {
+        Ok(client) => client,
+        Err(error) => {
+            result.error = Some(format!("provider proxy setup failed: {error:#}"));
+            return result;
+        }
+    };
     let get = |url: String| {
         // Protocol-correct auth (Anthropic: x-api-key + anthropic-version;
         // others: Authorization bearer) shared with the proxy. A balance
@@ -440,7 +452,7 @@ async fn fetch_balance(
         _ => {
             // No known balance endpoint: report credential health only,
             // reusing the model-catalog probe.
-            match list_models(&provider).await {
+            match list_models_with_proxy(&provider, proxy_url.as_deref()).await {
                 Ok(_) => result.ok = true,
                 Err(e) => result.error = Some(e.to_string()),
             }

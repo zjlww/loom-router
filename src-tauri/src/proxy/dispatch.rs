@@ -139,7 +139,7 @@ pub(super) async fn dispatch_routed(
         let config = ctx.config.read().await.clone();
         let destination_slug = format!("{}/{}", provider.id, upstream_model);
         match prepare_visual_assistance(
-            &ctx.client,
+            &ctx.clients,
             &config,
             &mut prepared_payload,
             wire,

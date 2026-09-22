@@ -316,7 +316,14 @@ async fn send_with_key(
         });
     }
 
-    let mut request = ctx.client.post(&url).json(body);
+    let client = ctx
+        .client_for_provider(&provider.id)
+        .await
+        .map_err(|error| UpstreamRequestError {
+            message: format!("provider '{}' proxy setup failed: {error:#}", provider.id),
+            timed_out: false,
+        })?;
+    let mut request = client.post(&url).json(body);
     if let Some(user_agent) = &provider.user_agent {
         request = request.header("user-agent", user_agent);
     }
