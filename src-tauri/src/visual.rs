@@ -147,14 +147,14 @@ static EVIDENCE_CACHE: OnceLock<Mutex<EvidenceCache>> = OnceLock::new();
 
 /// Calls the selected vision model and explicit retryable fallbacks.
 pub async fn analyze_with_fallbacks(
-    client: &reqwest::Client,
+    clients: &crate::network::ProviderClients,
     config: &AppConfig,
     image: &ImagePart,
     instruction: Option<&str>,
     headers: &HeaderMap,
 ) -> anyhow::Result<VisionOutcome> {
     let candidates = configured_candidates(config)?;
-    let image = prepare_image(client, image).await?;
+    let image = prepare_image(&clients.direct(), image).await?;
     let key = cache_key_for_bytes(&image.bytes, instruction, PROMPT_SCHEMA_VERSION);
 
     if let Some(cached) = cache()
@@ -173,7 +173,13 @@ pub async fn analyze_with_fallbacks(
     let mut attempts = Vec::new();
     for candidate in candidates {
         let started = Instant::now();
-        match request_evidence(client, &candidate, &image, instruction, headers).await {
+        let client = clients.for_proxy(
+            config
+                .provider_proxies
+                .get(&candidate.provider.id)
+                .map(String::as_str),
+        )?;
+        match request_evidence(&client, &candidate, &image, instruction, headers).await {
             Ok(evidence) => {
                 let model = candidate.slug.clone();
                 attempts.push(VisionAttempt {

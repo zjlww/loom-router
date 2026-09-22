@@ -203,7 +203,7 @@ pub(super) fn enrich_payload_with_evidence(
 /// receive images natively. Errors deliberately occur before an upstream
 /// request or downstream stream exists.
 pub(super) async fn prepare_visual_assistance(
-    client: &reqwest::Client,
+    clients: &crate::network::ProviderClients,
     config: &AppConfig,
     payload: &mut Value,
     wire: WireApi,
@@ -226,7 +226,7 @@ pub(super) async fn prepare_visual_assistance(
     for image in &images {
         let image_started = std::time::Instant::now();
         let outcome =
-            visual::analyze_with_fallbacks(client, config, &image.image, None, headers).await?;
+            visual::analyze_with_fallbacks(clients, config, &image.image, None, headers).await?;
         attempts.extend(outcome.attempts.iter().map(visual_attempt_provenance));
         let block = visual::evidence_block(&outcome.evidence, &outcome.model);
         match evidence_by_message.last_mut() {

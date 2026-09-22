@@ -9,6 +9,7 @@ mod cli_locator;
 pub mod codex;
 pub mod config;
 pub mod keypool;
+pub mod network;
 pub mod providers;
 pub mod proxy;
 pub mod secure_fs;

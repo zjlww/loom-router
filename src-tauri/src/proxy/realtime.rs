@@ -45,7 +45,7 @@ pub(super) async fn native_send(
         tracing::info!(stripped, "dropped item ids the native backend never issued");
     }
 
-    let mut req = ctx.client.post(&url).json(&payload);
+    let mut req = ctx.clients.direct().post(&url).json(&payload);
     for name in NATIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name) {
             if let Ok(v) = value.to_str() {
@@ -592,7 +592,7 @@ async fn ws_session(socket: WebSocket, ctx: ProxyCtx, headers: HeaderMap) {
                 let config = ctx.config.read().await.clone();
                 let destination_slug = format!("{}/{}", provider.id, upstream_model);
                 match prepare_visual_assistance(
-                    &ctx.client,
+                    &ctx.clients,
                     &config,
                     &mut payload,
                     WireApi::Responses,

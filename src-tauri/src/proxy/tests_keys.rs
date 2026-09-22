@@ -61,7 +61,7 @@ pub(super) fn test_ctx(key_pools: KeyPools) -> ProxyCtx {
         config: Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         stats: Arc::new(tokio::sync::RwLock::new(crate::stats::Stats::in_memory())),
         key_pools,
-        client: reqwest::Client::new(),
+        clients: crate::network::ProviderClients::new(std::time::Duration::from_secs(30)),
         history: Arc::new(Mutex::new(WsHistory::new())),
         wake: crate::wake_lock::WakeController::disabled(),
     }

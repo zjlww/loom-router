@@ -331,15 +331,20 @@ impl AppState {
         // model accepts. Validate before exposing a newly enabled model, so
         // Codex never routes its first real turn through a guessed wire.
         let detected_protocol = if enabled {
-            let provider = self
-                .config
-                .read()
-                .await
-                .providers
-                .get(provider_id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
-            Some(model_discovery::probe_model_dialect(&provider, model).await?)
+            let (provider, proxy_url) = {
+                let cfg = self.config.read().await;
+                let provider = cfg
+                    .providers
+                    .get(provider_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider_id}'"))?;
+                let proxy_url = cfg.provider_proxies.get(provider_id).cloned();
+                (provider, proxy_url)
+            };
+            Some(
+                model_discovery::probe_model_dialect(&provider, model, proxy_url.as_deref())
+                    .await?,
+            )
         } else {
             None
         };
@@ -843,6 +848,7 @@ impl AppState {
             .values()
             .filter(|p| p.enabled)
             .flat_map(|p| {
+                let proxy_url = cfg.provider_proxies.get(&p.id).cloned();
                 // Routing skips disabled keys, so probing them only spends a
                 // request to render an "unreachable" card for a key nobody
                 // uses. A provider whose keys are all off keeps its single
@@ -850,11 +856,11 @@ impl AppState {
                 // the proxy would, instead of silently leaving the dashboard.
                 let enabled: Vec<_> = p.keys.iter().filter(|key| key.enabled).collect();
                 if p.id == crate::providers::CLAUDE_CODE_PROVIDER_ID || enabled.is_empty() {
-                    vec![fetch_balance(p, None)]
+                    vec![fetch_balance(p, None, proxy_url.clone())]
                 } else {
                     enabled
                         .into_iter()
-                        .map(|key| fetch_balance(p, Some(key)))
+                        .map(|key| fetch_balance(p, Some(key), proxy_url.clone()))
                         .collect()
                 }
             })
