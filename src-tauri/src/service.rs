@@ -348,7 +348,7 @@ fn managed_binary_path() -> PathBuf {
     managed_data_dir().join("bin/loom-router")
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn launch_agent_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -422,7 +422,7 @@ fn launchctl_status() -> Result<(bool, Option<u32>)> {
     Ok((true, pid))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn launchctl_domain() -> Result<String> {
     let output = ProcessCommand::new("id")
         .arg("-u")
@@ -501,7 +501,7 @@ where
     Err(last_error.expect("attempts is at least one"))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn launch_agent_plist(binary: &Path) -> Result<String> {
     let home = dirs::home_dir().context("failed to locate the home directory")?;
     let log_dir = home.join("Library/Logs/LoomRouter");
