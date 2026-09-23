@@ -1,84 +1,61 @@
 # AGENTS.md - rules for code agents in this repo
 
-Operational rules for any agent (Claude Code, opencode, etc.) working in this
-repo. The goal is to keep work aligned with the conventions the repo already
-follows and avoid traps that have already cost time.
+LoomRouter is a headless Rust project. Keep it a single portable CLI binary;
+do not add a graphical runtime or installer toolchain.
 
-## Documentation: do not add docs
+## Documentation
 
-- Do not create or commit new documentation files (`docs/*`, research, decision,
-  roadmap, or plan `*.md` files). This includes `docs/*.md`.
-- Design decisions and roadmaps live in code (`// why` comments) and git
-  history, not in loose `.md` files.
-- Exceptions: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-  `CODE_OF_CONDUCT.md`, and the license are maintained, but only edit them when
-  the request is explicitly about them.
-- If you think "this change deserves docs", do not create a file. Leave a
-  comment in the code explaining why, or talk to the user.
+- Do not create loose research, plan, design, or decision files.
+- Keep `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, and `SECURITY.md`
+  current when a change makes them wrong.
+- Explain non-obvious implementation decisions in code comments instead of a
+  separate document.
 
-## Quality gate (always run before commit)
+## Quality gate
 
-CI (`ci.yml`) runs these on every push/PR. Run them locally before committing:
+Run these before committing:
 
 ```bash
-bun run lint
-bun run test
-bun run build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked --release
 ```
 
-- `rustfmt` differs between versions. CI uses `dtolnay/rust-toolchain@stable`.
-  If `cargo fmt --check` fails locally, run `cargo fmt` and rebuild before
-  blaming the formatter.
-- `cargo fmt --check` must pass exactly as CI runs it
-  (`--manifest-path src-tauri/Cargo.toml --check`).
+CI runs the same checks on Linux and builds the release executable on Linux,
+macOS arm64, and macOS x64.
 
-## Multi-OS: Windows, macOS, and Linux
+## Multi-platform
 
-- Every change must work on all three OSes: Windows, macOS, and Linux. CI only
-  builds/tests on `ubuntu-latest`, so passing the gate does not guarantee
-  Windows/macOS. The person changing the code must verify those platforms too.
-- When touching subprocess, shell, path, permission, or file secrecy code,
-  verify against all three OSes before saying it is done:
-  - CLI binary: `codex.exe` (Windows, `%LOCALAPPDATA%`) vs `codex` on PATH on
-    macOS/Linux (`~/.local/bin`, Homebrew, etc.); `claude.cmd`/`claude.exe`/
-    `claude`.
-  - Config paths: never hardcode `/Users/...` or `%USERPROFILE%`; use
-    `dirs::home_dir()`/`dirs::data_local_dir()`/`std::env::var("CODEX_HOME")`
-    (see `codex.rs`, `claude_cli.rs`, `secure_fs.rs`).
-  - Shell: macOS/Linux use `/bin/sh` + login shell; Windows does not, so guard
-    with `#[cfg(unix)]` (pattern already used in `claude_cli.rs`).
-  - File permissions (mode 0600, etc.) exist only on Unix, so guard with
-    `#[cfg(unix)]`; Windows keeps the default (see `secure_fs.rs`).
-- New code with `#[cfg(target_os)]`/`#[cfg(windows)]`/`#[cfg(unix)]` needs a
-  `// why` comment explaining the OS difference and why it exists.
-- If the change is unavoidably OS-specific, tell the user first. Do not assume
-  only macOS matters.
+- Every change must compile on Linux and macOS.
+- Use `dirs`, `std::env`, and platform-gated modules instead of hardcoded
+  `/Users`, `/home`, or `/Applications` paths.
+- New `#[cfg(target_os)]`, `#[cfg(unix)]`, or `#[cfg(windows)]` branches need
+  a `// why` comment explaining the platform difference.
+- Service management must keep the shared CLI and put launchd/systemd details
+  behind the platform backend in `src/service.rs`.
 
 ## Git
 
-- Direct pushes to `main` are blocked by repo policy. Work on a branch and open
-  a PR (`gh pr create`).
-- Use atomic commits in repo style (conventional):
-  `feat(scope):`, `fix(scope):`, `test(scope):`, `chore(scope):`,
-  `style(scope):`.
-- Do not amend commits already pushed to the PR; create a new commit instead.
-- Do not commit secrets, keys, or `.env` files.
+- Direct pushes to `main` are blocked. Work on a `codex/...` branch and open a
+  pull request.
+- Use conventional commit subjects such as `feat(proxy):`, `fix(cli):`,
+  `refactor(service):`, or `chore(ci):`.
+- Do not amend commits already pushed to a pull request.
+- Do not commit credentials, tokens, private keys, runtime databases, or
+  `.env` files.
 
 ## House style
 
-- Comments explain the why, never the what.
-- Frontend: React + Tailwind, types mirrored from `src-tauri/src`
-  (see `src/types/index.ts`), UI strings via `useStrings()`/i18n (en/pt/es/zh),
-  API mock in `src/lib/api.ts`.
-- Backend: Rust, modules in `src-tauri/src`, Tauri commands in `lib.rs` ->
-  `state.rs` -> `claude_cli.rs`/`codex.rs`/`proxy.rs`. Subprocess spawning must
-  always happen in `spawn_blocking`.
-- Tests: `cargo test` (Rust unit + `tests/e2e.rs`) and `vitest` (frontend).
+- Comments explain why, not what.
+- Keep protocol knowledge in `src/translate`.
+- Keep security-sensitive filesystem writes in `src/secure_fs`.
+- Keep subprocess spawning off async worker threads with `spawn_blocking`.
+- Add unit tests beside the module and end-to-end tests under `tests/`.
+- Prefer deleting obsolete code over carrying compatibility layers with no
+  caller.
 
 ## Text style
 
-- Never use em dashes or en dashes in user-facing text or new UI copy.
-- Use commas, colons, periods, parentheses, or a single hyphen (`-`) with spaces instead.
+Never use em dashes or en dashes in user-facing text. The rule applies to CLI
+output and documentation.

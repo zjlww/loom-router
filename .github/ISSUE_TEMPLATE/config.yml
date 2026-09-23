@@ -6,7 +6,7 @@ blank_issues_enabled: true
 
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/imateusdev/loom-router/blob/main/SECURITY.md
+    url: https://github.com/zjlww/loom-router/blob/main/SECURITY.md
     about: >-
       Open a normal bug report — public is fine. LoomRouter runs only on your
       own machine, so there's no fleet to protect with a disclosure window.

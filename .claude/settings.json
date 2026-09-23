@@ -1,13 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(bun run lint)",
-      "Bash(bun run test)",
-      "Bash(bun run test:*)",
-      "Bash(bun run build)",
-      "Bash(rtk cargo fmt --manifest-path src-tauri/Cargo.toml --check)",
-      "Bash(rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings)",
-      "Bash(rtk cargo test --manifest-path src-tauri/Cargo.toml)"
+      "Bash(cargo fmt --check)",
+      "Bash(cargo clippy --all-targets -- -D warnings)",
+      "Bash(cargo test)",
+      "Bash(rtk cargo fmt --check)",
+      "Bash(rtk cargo clippy --all-targets -- -D warnings)",
+      "Bash(rtk cargo test)"
     ]
   }
 }
