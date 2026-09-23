@@ -13,6 +13,7 @@ pub mod network;
 pub mod providers;
 pub mod proxy;
 pub mod secure_fs;
+pub(crate) mod service;
 pub mod sse;
 pub mod state;
 pub mod stats;
@@ -21,14 +22,19 @@ pub mod translate;
 pub mod visual;
 mod wake_lock;
 
+#[cfg(feature = "desktop")]
 mod tray;
 
+#[cfg(feature = "desktop")]
 use state::AppState;
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
+#[cfg(feature = "desktop")]
 const NATIVE_CATALOG_REFRESH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(15 * 60);
 
+#[cfg(feature = "desktop")]
 fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Startup performs the first capture. Start the interval afterward so
@@ -45,6 +51,7 @@ fn schedule_native_catalog_refresh(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -156,6 +163,7 @@ pub fn run() {
 }
 
 // Tauri commands live in lib.rs-adjacent module to keep the boundary thin.
+#[cfg(feature = "desktop")]
 pub mod commands {
     use crate::config::{AppConfig, Provider, SleepPreventionMode, VisualAssistanceConfig};
     use crate::state::{AppState, ServerStatus, SetupStatus};

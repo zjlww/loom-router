@@ -1,27 +1,13 @@
 use crate::config::AppConfig;
+use crate::service::{self, ServiceStatus};
 use crate::state::AppState;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-const SERVICE_LABEL: &str = "dev.loomrouter.agent";
 const CATALOG_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-// why: launchd unloads a booted-out job asynchronously. It schedules cleanup a
-// few seconds later and rejects a bootstrap of the same label with
-// "Operation already in progress" (EALREADY) until that cleanup finishes, so an
-// install that boots out and immediately re-bootstraps the agent fails unless we
-// wait for the label to disappear first.
-const SERVICE_REMOVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-const SERVICE_REMOVAL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
-// why: even after the label is gone launchd can still refuse the first
-// bootstrap that races a teardown it has not finished bookkeeping, so retry a
-// bounded number of times instead of failing the install (and leaving the
-// service down) on a transient error.
-const SERVICE_BOOTSTRAP_ATTEMPTS: usize = 10;
-const SERVICE_BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -40,7 +26,7 @@ enum Command {
     Serve,
     /// Print machine-readable service and proxy state as JSON.
     Status,
-    /// Manage the per-user macOS LaunchAgent.
+    /// Manage the per-user service (launchd on macOS, systemd on Linux).
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -57,9 +43,9 @@ enum ServiceCommand {
         #[arg(long)]
         link: Option<PathBuf>,
     },
-    /// Unload and remove the LaunchAgent. Configuration and credentials stay.
+    /// Stop and remove the service. Configuration and credentials stay.
     Uninstall,
-    /// Restart the LaunchAgent.
+    /// Restart the service.
     Restart,
     /// Print the same JSON as `loom-router status`.
     Status,
@@ -73,18 +59,6 @@ struct StatusReport {
     proxy: ProxyStatus,
     config: ConfigStatus,
     codex: CodexStatus,
-}
-
-#[derive(Debug, Serialize)]
-struct ServiceStatus {
-    platform: &'static str,
-    label: &'static str,
-    installed: bool,
-    loaded: bool,
-    pid: Option<u32>,
-    binary_path: PathBuf,
-    plist_path: PathBuf,
-    cli_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,18 +99,6 @@ struct CodexStatus {
     native_catalog_present: bool,
     merged_catalog_present: bool,
     merged_model_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ServiceOperation {
-    action: &'static str,
-    label: &'static str,
-    installed: bool,
-    loaded: bool,
-    pid: Option<u32>,
-    binary_path: PathBuf,
-    plist_path: PathBuf,
-    cli_path: Option<PathBuf>,
 }
 
 pub fn run() -> Result<()> {
@@ -241,15 +203,15 @@ fn print_status() -> Result<()> {
 fn run_service_command(command: ServiceCommand) -> Result<()> {
     match command {
         ServiceCommand::Install { link } => {
-            let operation = install_service(link.as_deref())?;
+            let operation = service::install(link.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&operation)?);
         }
         ServiceCommand::Uninstall => {
-            let operation = uninstall_service()?;
+            let operation = service::uninstall()?;
             println!("{}", serde_json::to_string_pretty(&operation)?);
         }
         ServiceCommand::Restart => {
-            let operation = restart_service()?;
+            let operation = service::restart()?;
             println!("{}", serde_json::to_string_pretty(&operation)?);
         }
         ServiceCommand::Status => print_status()?,
@@ -259,7 +221,7 @@ fn run_service_command(command: ServiceCommand) -> Result<()> {
 
 async fn status_report() -> Result<StatusReport> {
     let config = AppConfig::load();
-    let service = service_status();
+    let service = service::status();
     let proxy = probe_proxy(&config).await;
     let ok = service.loaded && proxy.running && proxy.authenticated;
 
@@ -426,384 +388,6 @@ async fn probe_proxy(config: &AppConfig) -> ProxyStatus {
     }
 }
 
-fn install_service(link: Option<&Path>) -> Result<ServiceOperation> {
-    ensure_macos()?;
-    let source = std::env::current_exe().context("failed to locate the current executable")?;
-    let binary = managed_binary_path();
-    install_managed_binary(&source, &binary)?;
-
-    let plist = launch_agent_path();
-    if let Some(parent) = plist.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&plist, launch_agent_plist(&binary)?)
-        .with_context(|| format!("failed to write {}", plist.display()))?;
-
-    let domain = launchctl_domain()?;
-    let service = service_target(&domain);
-    let _ = run_launchctl(["bootout", service.as_str()]);
-    wait_for_service_removal(&service);
-    retry_launchctl(
-        SERVICE_BOOTSTRAP_ATTEMPTS,
-        SERVICE_BOOTSTRAP_RETRY_DELAY,
-        || run_launchctl(["bootstrap", domain.as_str(), path_str(&plist)?]),
-    )
-    .context("launchctl bootstrap failed")?;
-    run_launchctl(["kickstart", "-k", service.as_str()]).context("launchctl kickstart failed")?;
-
-    if let Some(link) = link {
-        install_cli_link(link, &binary)?;
-    }
-    Ok(service_operation("install", link))
-}
-
-fn uninstall_service() -> Result<ServiceOperation> {
-    ensure_macos()?;
-    let domain = launchctl_domain()?;
-    let service = service_target(&domain);
-    let _ = run_launchctl(["bootout", service.as_str()]);
-    wait_for_service_removal(&service);
-    let plist = launch_agent_path();
-    match std::fs::remove_file(&plist) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to remove {}", plist.display()))
-        }
-    }
-    Ok(service_operation("uninstall", None))
-}
-
-fn restart_service() -> Result<ServiceOperation> {
-    ensure_macos()?;
-    let domain = launchctl_domain()?;
-    let service = service_target(&domain);
-    run_launchctl(["kickstart", "-k", service.as_str()]).context("launchctl kickstart failed")?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    Ok(service_operation("restart", None))
-}
-
-fn service_operation(action: &'static str, link: Option<&Path>) -> ServiceOperation {
-    let service = service_status();
-    ServiceOperation {
-        action,
-        label: SERVICE_LABEL,
-        installed: service.installed,
-        loaded: service.loaded,
-        pid: service.pid,
-        binary_path: service.binary_path,
-        plist_path: service.plist_path,
-        cli_path: link
-            .map(Path::to_path_buf)
-            .or_else(|| find_cli_link(&managed_binary_path())),
-    }
-}
-
-fn service_status() -> ServiceStatus {
-    let binary_path = managed_binary_path();
-    let plist_path = launch_agent_path();
-    let installed = binary_path.is_file() && plist_path.is_file();
-    let (loaded, pid) = launchctl_status().unwrap_or((false, None));
-    ServiceStatus {
-        platform: std::env::consts::OS,
-        label: SERVICE_LABEL,
-        installed,
-        loaded,
-        pid,
-        cli_path: find_cli_link(&binary_path),
-        binary_path,
-        plist_path,
-    }
-}
-
-fn launchctl_status() -> Result<(bool, Option<u32>)> {
-    ensure_macos()?;
-    let domain = launchctl_domain()?;
-    let service = service_target(&domain);
-    let output = ProcessCommand::new("launchctl")
-        .args(["print", service.as_str()])
-        .output()
-        .context("failed to run launchctl print")?;
-    if !output.status.success() {
-        return Ok((false, None));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let pid = text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("pid = ")
-            .and_then(|value| value.trim().parse::<u32>().ok())
-    });
-    Ok((true, pid))
-}
-
-fn ensure_macos() -> Result<()> {
-    if cfg!(target_os = "macos") {
-        Ok(())
-    } else {
-        bail!("LaunchAgent management is only supported on macOS")
-    }
-}
-
-fn launchctl_domain() -> Result<String> {
-    let output = ProcessCommand::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to determine the current uid")?;
-    if !output.status.success() {
-        bail!("id -u failed");
-    }
-    let uid = String::from_utf8(output.stdout)?.trim().to_string();
-    if uid.is_empty() {
-        bail!("id -u returned an empty uid");
-    }
-    Ok(format!("gui/{uid}"))
-}
-
-fn service_target(domain: &str) -> String {
-    format!("{domain}/{SERVICE_LABEL}")
-}
-
-fn run_launchctl<const N: usize>(args: [&str; N]) -> Result<()> {
-    let output = ProcessCommand::new("launchctl")
-        .args(args)
-        .output()
-        .context("failed to run launchctl")?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    bail!(
-        "launchctl exited with {}: {}{}",
-        output.status,
-        stdout.trim(),
-        stderr.trim()
-    )
-}
-
-fn service_is_loaded(service: &str) -> bool {
-    ProcessCommand::new("launchctl")
-        .args(["print", service])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn wait_for_service_removal(service: &str) -> bool {
-    let deadline = std::time::Instant::now() + SERVICE_REMOVAL_TIMEOUT;
-    while service_is_loaded(service) {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(SERVICE_REMOVAL_POLL);
-    }
-    true
-}
-
-fn retry_launchctl<F>(attempts: usize, delay: std::time::Duration, mut operation: F) -> Result<()>
-where
-    F: FnMut() -> Result<()>,
-{
-    let mut last_error = None;
-    for _ in 0..attempts.max(1) {
-        match operation() {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                last_error = Some(error);
-                std::thread::sleep(delay);
-            }
-        }
-    }
-    Err(last_error.expect("attempts is at least one"))
-}
-
-fn install_managed_binary(source: &Path, destination: &Path) -> Result<()> {
-    if source == destination {
-        return Ok(());
-    }
-    let parent = destination
-        .parent()
-        .context("managed binary path has no parent directory")?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.new",
-        destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("loom-router")
-    ));
-    std::fs::copy(source, &temporary).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            source.display(),
-            temporary.display()
-        )
-    })?;
-    make_executable(&temporary)?;
-    std::fs::rename(&temporary, destination)
-        .with_context(|| format!("failed to install {}", destination.display()))?;
-    Ok(())
-}
-
-fn make_executable(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions)?;
-    }
-    Ok(())
-}
-
-fn install_cli_link(link: &Path, binary: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::symlink_metadata(link) {
-            Ok(metadata) if metadata.file_type().is_symlink() => std::fs::remove_file(link)?,
-            Ok(_) => bail!("refusing to replace non-symlink {}", link.display()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        symlink(binary, link)
-            .with_context(|| format!("failed to create symlink {}", link.display()))?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (link, binary);
-        bail!("CLI links are not supported on this platform")
-    }
-}
-
-fn find_cli_link(binary: &Path) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    [
-        PathBuf::from("/opt/homebrew/bin/loom-router"),
-        home.join(".local/bin/loom-router"),
-        home.join("bin/loom-router"),
-    ]
-    .into_iter()
-    .find(|candidate| {
-        std::fs::read_link(candidate)
-            .map(|target| {
-                let absolute = if target.is_absolute() {
-                    target
-                } else {
-                    candidate
-                        .parent()
-                        .map(|parent| parent.join(&target))
-                        .unwrap_or(target)
-                };
-                same_path(&absolute, binary)
-            })
-            .unwrap_or(false)
-    })
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
-fn launch_agent_plist(binary: &Path) -> Result<String> {
-    let home = dirs::home_dir().context("failed to locate the home directory")?;
-    let log_dir = home.join("Library/Logs/LoomRouter");
-    std::fs::create_dir_all(&log_dir)?;
-    let stdout = log_dir.join("loom-router.log");
-    let stderr = log_dir.join("loom-router.err.log");
-    Ok(render_launch_agent_plist(binary, &home, &stdout, &stderr))
-}
-
-fn render_launch_agent_plist(
-    binary: &Path,
-    working_directory: &Path,
-    stdout: &Path,
-    stderr: &Path,
-) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{binary}</string>
-    <string>serve</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>{working_directory}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
-  <key>ThrottleInterval</key>
-  <integer>5</integer>
-  <key>StandardOutPath</key>
-  <string>{stdout}</string>
-  <key>StandardErrorPath</key>
-  <string>{stderr}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>RUST_LOG</key>
-    <string>loom_router=info</string>
-  </dict>
-</dict>
-</plist>
-"#,
-        label = SERVICE_LABEL,
-        binary = xml_escape(&binary.display().to_string()),
-        working_directory = xml_escape(&working_directory.display().to_string()),
-        stdout = xml_escape(&stdout.display().to_string()),
-        stderr = xml_escape(&stderr.display().to_string()),
-    )
-}
-
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn managed_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("Library/Application Support")
-        })
-        .join("LoomRouter")
-}
-
-fn managed_binary_path() -> PathBuf {
-    managed_data_dir().join("bin/loom-router")
-}
-
-fn launch_agent_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/LaunchAgents")
-        .join(format!("{SERVICE_LABEL}.plist"))
-}
-
-fn path_str(path: &Path) -> Result<&str> {
-    path.to_str().context("path is not valid UTF-8")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,54 +412,6 @@ mod tests {
                 command: ServiceCommand::Install { link: Some(_) }
             })
         ));
-    }
-
-    #[test]
-    fn launch_agent_runs_the_headless_serve_command() {
-        let plist = render_launch_agent_plist(
-            Path::new("/Users/test/Library/Application Support/LoomRouter/bin/loom-router"),
-            Path::new("/Users/test"),
-            Path::new("/Users/test/Library/Logs/LoomRouter/loom-router.log"),
-            Path::new("/Users/test/Library/Logs/LoomRouter/loom-router.err.log"),
-        );
-        assert!(plist.contains("<string>serve</string>"));
-        assert!(plist.contains("<key>RunAtLoad</key>"));
-        assert!(plist.contains("<key>KeepAlive</key>"));
-        assert!(!plist.contains("--window"));
-    }
-
-    #[test]
-    fn service_target_is_scoped_to_the_launch_agent() {
-        assert_eq!(service_target("gui/501"), "gui/501/dev.loomrouter.agent");
-        assert_ne!(service_target("gui/501"), "gui/501");
-    }
-
-    #[test]
-    fn retry_launchctl_recovers_from_transient_failures() {
-        let mut calls = 0;
-        let result = retry_launchctl(3, std::time::Duration::ZERO, || {
-            calls += 1;
-            if calls < 3 {
-                bail!("transient launchctl failure");
-            }
-            Ok(())
-        });
-
-        assert!(result.is_ok());
-        assert_eq!(calls, 3);
-    }
-
-    #[test]
-    fn retry_launchctl_reports_the_last_error_once_the_budget_is_spent() {
-        let mut calls = 0;
-        let result = retry_launchctl(2, std::time::Duration::ZERO, || {
-            calls += 1;
-            bail!("Bootstrap failed: 5: Input/output error")
-        });
-
-        let error = result.expect_err("retry budget is exhausted");
-        assert_eq!(calls, 2);
-        assert!(error.to_string().contains("Bootstrap failed"));
     }
 
     #[test]

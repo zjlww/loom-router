@@ -53,12 +53,33 @@ routed through LoomRouter - same list, same shortcuts, no separate mode.</sub>
 
 ## 🚀 Getting started
 
+### Headless executable
+
+The default build is the portable headless CLI. It does not link Tauri, WebKit
+or a desktop runtime, so the same source builds directly on macOS and Linux:
+
+```bash
+cargo build --manifest-path src-tauri/Cargo.toml --locked --release
+./src-tauri/target/release/loom-router serve
+```
+
+Install it as a per-user background service:
+
+```bash
+./src-tauri/target/release/loom-router service install --link ~/.local/bin/loom-router
+./src-tauri/target/release/loom-router status
+```
+
+On macOS this manages the `dev.loomrouter.agent` LaunchAgent. On Linux it
+manages the `loom-router.service` user unit through `systemctl --user`.
+Configuration remains in `~/.loomrouter/config.json` on both platforms.
+
 ### Download
 
 Grab the latest installer for your platform from
 [Releases](../../releases) (Windows, macOS, Linux).
 
-### From source
+### Desktop source (optional)
 
 Prerequisites: [Bun](https://bun.sh) and a
 [Rust toolchain](https://rustup.rs).
@@ -67,7 +88,7 @@ Prerequisites: [Bun](https://bun.sh) and a
 git clone https://github.com/imateusdev/loom-router.git
 cd loom-router
 bun install
-bun run tauri dev
+bun run tauri dev --features desktop
 ```
 
 ### Set up (about 1 minute)
@@ -223,9 +244,8 @@ understand exactly why you need them:
 
 ```bash
 bun install
-bun run tauri dev     # desktop app with hot reload
 bun run dev           # frontend only, in the browser (mock backend)
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
 
 ```
@@ -242,9 +262,21 @@ src-tauri/      Rust backend
 
 ## 📦 Building installers
 
+Headless release archives are built by `release.yml` for Linux x64 and macOS
+arm64/x64. Each archive contains the `loom-router` executable and a SHA-256
+file:
+
+```bash
+tar -xzf loom-router-<version>-<target>.tar.gz
+./loom-router --version
+```
+
+The commands below build the optional desktop bundles from the retained Tauri
+source:
+
 ```bash
 bun install
-bun run tauri build
+bun run tauri build --features desktop
 ```
 
 Artifacts land in `src-tauri/target/release/bundle/`:
