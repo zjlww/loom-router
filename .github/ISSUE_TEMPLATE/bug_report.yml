@@ -1,21 +1,20 @@
 name: Bug report
-description: Something is broken — a model that won't appear, a request that fails, a crash.
+description: Something is broken - a model that will not appear, a request that fails, a crash.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         **Before you paste anything:** LoomRouter sits between your agent and
-        your provider, so its traffic carries your prompts, your source code
-        and your API keys. Redact keys, and prefer metadata (path, status,
-        byte length) over full request or response bodies. If a body is
-        genuinely needed to diagnose this, we'll ask for it privately.
+        your provider, so its traffic carries your prompts, source code, and
+        API keys. Redact keys, and prefer metadata such as path, status, and
+        byte length over full request or response bodies.
 
   - type: input
     id: version
     attributes:
       label: LoomRouter version
-      description: Shown in the app, or the release you installed.
+      description: Run `loom-router --version`.
       placeholder: "0.2.4"
     validations:
       required: true
@@ -25,10 +24,9 @@ body:
     attributes:
       label: OS and architecture
       options:
-        - Windows (x64)
         - macOS (Apple Silicon)
         - macOS (Intel)
-        - Linux (built from source)
+        - Linux (x64)
     validations:
       required: true
 
@@ -72,8 +70,7 @@ body:
       label: What happened
       description: >-
         The observed behaviour, and what you expected instead. If it's a
-        failed request, include the status code and any error text the UI
-        showed.
+        failed request, include the status code and error text.
     validations:
       required: true
 
@@ -82,10 +79,10 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Add provider … in Providers
-        2. Select model … in the Codex picker
-        3. Send "…"
-        4. Request fails with …
+        1. Configure provider ...
+        2. Select model ... in the Codex picker
+        3. Send "..."
+        4. Request fails with ...
     validations:
       required: true
 
@@ -94,8 +91,8 @@ body:
     attributes:
       label: Relevant log lines
       description: >-
-        Keys are blanked before they reach the UI, but check anything you
-        paste from disk or a terminal — that path has no such filter.
+        Check anything you paste from disk or a terminal. Logs can contain
+        request metadata even though bodies are not recorded.
       render: text
 
   - type: checkboxes
