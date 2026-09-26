@@ -38,12 +38,14 @@ use std::sync::{Arc, Mutex};
 
 mod auth;
 mod dispatch;
+mod image_tokens;
 mod realtime;
 mod routing;
 mod streaming;
 mod upstream;
 mod visuals;
 
+use image_tokens::*;
 use realtime::*;
 use streaming::*;
 use visuals::*;
