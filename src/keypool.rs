@@ -14,6 +14,10 @@ use tokio::sync::RwLock;
 pub enum FailureKind {
     Auth,
     Transient,
+    /// The request never reached the provider: DNS, connect, TLS, timeout, or
+    /// proxy setup. Every key on a provider shares one `base_url`, so this is a
+    /// statement about the host, not about any particular key.
+    Unreachable,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +120,14 @@ impl KeyPools {
                     },
                 );
             }
+            // No cooldown, and no step up the backoff ladder. A connection that
+            // never opened is a host-level fact, not a verdict on this key: all
+            // keys on a provider share one base_url, so cooling them is what
+            // turned a dropped link into a 60s, then 300s, then 1500s provider
+            // outage that outlived the disconnect. Leaving the key eligible lets
+            // the first request after the link returns succeed straight away
+            // instead of waiting a window out.
+            FailureKind::Unreachable => {}
         }
     }
 
@@ -493,5 +505,30 @@ mod tests {
 
         let p = provider(vec![key("a", true)]);
         assert_eq!(pools.eligible_keys(&p, false).await[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn ut_053_an_unreachable_host_does_not_cool_the_key() {
+        let pools = KeyPools::new();
+        let p = provider(vec![key("a", true)]);
+
+        // A dropped link is answered on the first request after it returns, so
+        // the key must stay selectable and must not climb the backoff ladder.
+        pools
+            .record_failure("provider", "a", FailureKind::Unreachable, None)
+            .await;
+        pools
+            .record_failure("provider", "a", FailureKind::Unreachable, None)
+            .await;
+
+        assert_eq!(pools.eligible_keys(&p, false).await[0].id, "a");
+        assert!(pools.inner.read().await["provider"].health.is_empty());
+
+        // A later genuine upstream rejection still starts the ladder at its
+        // first step rather than inheriting the unreachable attempts.
+        pools
+            .record_failure("provider", "a", FailureKind::Transient, None)
+            .await;
+        assert_eq!(pools.inner.read().await["provider"].failures["a"], 1);
     }
 }

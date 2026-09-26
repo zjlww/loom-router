@@ -40,6 +40,9 @@ pub(super) struct UpstreamResponse {
 struct UpstreamRequestError {
     message: String,
     timed_out: bool,
+    /// True when the request never reached the provider, so the failure is a
+    /// fact about the host and not about the key that carried the request.
+    unreachable: bool,
 }
 
 /// Apply the provider's upstream authentication to an outgoing request.
@@ -267,8 +270,17 @@ pub(super) async fn send_outcome(
                 };
             }
             Err(error) => {
+                // A request that never reached the provider is a host-level
+                // failure rather than a bad credential, so it must not sideline
+                // the key: doing that is what made a dropped link look like a
+                // provider outage.
+                let failure = if error.unreachable {
+                    FailureKind::Unreachable
+                } else {
+                    FailureKind::Transient
+                };
                 ctx.key_pools
-                    .record_failure(&provider.id, &key.id, FailureKind::Transient, None)
+                    .record_failure(&provider.id, &key.id, failure, None)
                     .await;
                 last_error = Some(error.message.clone());
                 last_outcome = UpstreamOutcome {
@@ -313,6 +325,9 @@ async fn send_with_key(
         return Err(UpstreamRequestError {
             message: format!("provider '{}' has no API key", provider.id),
             timed_out: false,
+            // A missing credential is a configuration fact about this provider,
+            // not a network one, so it keeps the ordinary transient handling.
+            unreachable: false,
         });
     }
 
@@ -322,6 +337,7 @@ async fn send_with_key(
         .map_err(|error| UpstreamRequestError {
             message: format!("provider '{}' proxy setup failed: {error:#}", provider.id),
             timed_out: false,
+            unreachable: true,
         })?;
     let mut request = client.post(&url).json(body);
     if let Some(user_agent) = &provider.user_agent {
@@ -334,6 +350,9 @@ async fn send_with_key(
             .to_string();
         UpstreamRequestError {
             timed_out: e.is_timeout(),
+            // DNS, connect, TLS and timeout failures all land here, and none of
+            // them reached the provider, so no key is to blame for them.
+            unreachable: true,
             message,
         }
     })

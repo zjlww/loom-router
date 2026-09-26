@@ -669,6 +669,29 @@ async fn ut_042c_send_outcome_keeps_network_facts_separate_from_status() {
 }
 
 #[tokio::test]
+async fn ut_042d_an_unreachable_host_does_not_report_a_cooling_key() {
+    let ctx = test_ctx(KeyPools::new());
+    let provider = keyed_provider(
+        "http://127.0.0.1:1/v1".into(),
+        vec![key("key-a", "secret-a")],
+        false,
+    );
+
+    // The first request finds the host unreachable. The second must still reach
+    // for the provider: a link that is down is not a verdict on the key, and
+    // answering "cooling down" here is what kept Codex on a 502 long after the
+    // network had come back.
+    for _ in 0..2 {
+        let error = send(&ctx, &provider, "responses", &json!({"model": "m"}), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not reach"), "{error}");
+        assert!(!error.contains("cooling down"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn ut_042b_all_keys_cooling_is_not_reported_as_a_config_error() {
     // The keys are configured and enabled; they are merely resting after a
     // burst of 429s. "No enabled API key" sends the user to a settings page
