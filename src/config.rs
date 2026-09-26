@@ -276,6 +276,12 @@ pub struct AppConfig {
     /// overrides a slug, so LoomRouter never invents a larger limit silently.
     #[serde(default)]
     pub native_model_context_overrides: BTreeMap<String, u32>,
+    /// Per-model image token budgets, keyed by `provider/model`. Image
+    /// billing is model-specific and changes independently of context-window
+    /// metadata; this override lets a new upstream formula be corrected
+    /// without changing the proxy's clamp implementation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub image_token_overrides: BTreeMap<String, usize>,
     /// Model Codex starts new sessions with, in the canonical
     /// `provider/model` form (independent of `native_slug_mode`, which only
     /// decides the *published* slug). Materialized as the root `model` key
@@ -344,6 +350,7 @@ impl Default for AppConfig {
             native_slug_mode: false,
             sleep_prevention: SleepPreventionMode::default(),
             native_model_context_overrides: BTreeMap::new(),
+            image_token_overrides: BTreeMap::new(),
             active_model: None,
             codex_model_backup: None,
             migrated: false,
@@ -428,6 +435,18 @@ impl AppConfig {
                 if model.id.trim().is_empty() {
                     return Err(format!("provider '{provider_id}' has an empty model id"));
                 }
+            }
+        }
+        for (slug, tokens) in &self.image_token_overrides {
+            if !slug.contains('/') {
+                return Err(format!(
+                    "image token override '{slug}' must use the provider/model form"
+                ));
+            }
+            if !(1..=1_000_000).contains(tokens) {
+                return Err(format!(
+                    "image token override for '{slug}' must be between 1 and 1000000"
+                ));
             }
         }
         Ok(())

@@ -196,22 +196,6 @@ impl WsHistory {
     }
 }
 
-/// Conservative estimate of the token count of a rebuilt Responses input item
-/// list. The proxy has no tokenizer; chars/4 is the same heuristic opencode's
-/// v2 uses (see packages/core/src/util/token.ts). Only used to decide where
-/// to clamp, so an off-by-a-factor just shifts the cut, never breaks a request.
-pub(super) fn estimate_tokens(items: &[Value]) -> usize {
-    items.iter().map(|v| v.to_string().len() / 3).sum()
-}
-
-/// Same heuristic for the parts of a Responses payload outside the input
-/// items: instructions, tool definitions, structured fields and delimiters.
-/// Codex's own context accounting does not always include these, so the proxy
-/// subtracts them from the budget before deciding what fits.
-pub(super) fn estimate_non_input_tokens(payload: &Value, items: &[Value]) -> usize {
-    (payload.to_string().len() / 3).saturating_sub(estimate_tokens(items))
-}
-
 /// How many tokens to keep free for the destination model's reply when
 /// clamping a routed turn, mirroring opencode's COMPACTION_BUFFER (20k).
 /// Without the reserve, a full-window input is rejected before the model
@@ -234,15 +218,16 @@ fn truncation_marker() -> Value {
 
 /// Clamp using the same heuristic while reserving room for the non-input
 /// fields (instructions/tools) that the upstream will tokenize too.
-fn clamp_to_window_with_overhead(
+pub(super) fn clamp_to_window_with_overhead(
     items: Vec<Value>,
     window_tokens: i64,
     non_input_tokens: usize,
+    image_policy: ImageTokenPolicy,
 ) -> (Vec<Value>, Vec<Value>) {
     let usable = (window_tokens as usize)
         .saturating_sub(CONTEXT_RESERVE_TOKENS)
         .saturating_sub(non_input_tokens);
-    if estimate_tokens(&items) <= usable {
+    if estimate_tokens(&items, image_policy) <= usable {
         return (items, Vec::new());
     }
     // Drop from the front until the serialized estimate fits. The tail is
@@ -250,7 +235,8 @@ fn clamp_to_window_with_overhead(
     // the first surviving index; it advances while the surviving slice still
     // overflows and there is at least one newer item left to keep.
     let mut keep_from = 0;
-    while keep_from + 1 < items.len() && estimate_tokens(&items[keep_from..]) > usable {
+    while keep_from + 1 < items.len() && estimate_tokens(&items[keep_from..], image_policy) > usable
+    {
         keep_from += 1;
     }
     (items[keep_from..].to_vec(), items[..keep_from].to_vec())
@@ -262,7 +248,12 @@ fn clamp_to_window_with_overhead(
 /// nothing was removed).
 #[cfg(test)]
 pub(super) fn clamp_to_window(items: Vec<Value>, window_tokens: i64) -> (Vec<Value>, Vec<Value>) {
-    clamp_to_window_with_overhead(items, window_tokens, 0)
+    clamp_to_window_with_overhead(
+        items,
+        window_tokens,
+        0,
+        ImageTokenPolicy::Fixed(DEFAULT_IMAGE_TOKENS),
+    )
 }
 
 /// Flatten Responses-wire input items (role + content blocks) to plain text.
@@ -427,8 +418,11 @@ pub(super) async fn clamp_routed_input(
     headers: &HeaderMap,
 ) -> Vec<Value> {
     let window = crate::codex::context_window_for(provider, upstream_model).window;
-    let non_input_tokens = estimate_non_input_tokens(payload, &items);
-    let (mut fit, dropped) = clamp_to_window_with_overhead(items, window, non_input_tokens);
+    let config = ctx.config.read().await.clone();
+    let image_policy = policy_for_model(&config, provider, upstream_model);
+    let non_input_tokens = estimate_non_input_tokens(payload, &items, image_policy);
+    let (mut fit, dropped) =
+        clamp_to_window_with_overhead(items, window, non_input_tokens, image_policy);
     if dropped.is_empty() {
         return fit;
     }
@@ -440,10 +434,9 @@ pub(super) async fn clamp_routed_input(
         dropped = dropped.len(),
         "conversation exceeded destination window; clamped the oldest turns"
     );
-    let cfg = ctx.config.read().await.clone();
     let marker = match tokio::time::timeout(
         std::time::Duration::from_secs(45),
-        summarize_dropped_turns(ctx, &cfg, &dropped, headers),
+        summarize_dropped_turns(ctx, &config, &dropped, headers),
     )
     .await
     {

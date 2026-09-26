@@ -67,6 +67,41 @@ fn clamp_reports_every_dropped_turn() {
     assert!(fit[0].to_string().contains("tail"));
 }
 
+#[test]
+fn multi_megabyte_images_do_not_clamp_text_history_as_base64() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&13_u32.to_be_bytes());
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&1_323_u32.to_be_bytes());
+    png.extend_from_slice(&1_871_u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0]);
+    png.resize(1_000_000, 0);
+    let image_url = format!("data:image/png;base64,{}", STANDARD.encode(png));
+
+    let mut items: Vec<Value> = (0..300)
+        .map(|index| item("user", &format!("turn {index}: {}", "x".repeat(1_000))))
+        .collect();
+    for _ in 0..4 {
+        items.push(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "view_image:1",
+            "output": [{
+                "type": "input_image",
+                "image_url": image_url,
+                "detail": "high"
+            }]
+        }));
+    }
+
+    let (fit, dropped) =
+        clamp_to_window_with_overhead(items.clone(), 1_000_000, 0, ImageTokenPolicy::Fixed(256));
+
+    assert!(dropped.is_empty(), "base64 bytes must not trigger a clamp");
+    assert_eq!(fit.len(), items.len());
+}
+
 /// Bill a prepared compaction payload the way the upstream does, so an
 /// assertion cannot pass by agreeing with the optimistic chars/3 estimator.
 fn billed_tokens(prepared: &Value, items: &[Value]) -> usize {
